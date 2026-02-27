@@ -384,7 +384,14 @@ def condense_with_claude(tailored: dict) -> dict:
 # ── API Endpoints ──────────────────────────────────────────────────────────────
 @app.get("/health")
 async def health():
-    return {"status": "ok", "model": CLAUDE_MODEL}
+    font_files = list(FONTS_DIR.glob("*.ttf")) if FONTS_DIR.exists() else []
+    return {
+        "status": "ok",
+        "model": CLAUDE_MODEL,
+        "fonts_dir": str(FONTS_DIR),
+        "fonts_found": [f.name for f in font_files],
+        "fonts_dir_exists": FONTS_DIR.exists(),
+    }
 
 @app.post("/tailor")
 async def tailor_resume(req: TailorRequest):

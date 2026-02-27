@@ -1,4 +1,10 @@
 {
+    "functions": {
+        "api/index.py": {
+            "maxDuration": 60,
+            "includeFiles": "api/fonts/**"
+        }
+    },
     "rewrites": [
         {
             "source": "/tailor",
