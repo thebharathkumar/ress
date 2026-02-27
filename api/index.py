@@ -9,95 +9,82 @@ import re
 import traceback
 from pathlib import Path
 
-import requests as http_requests
+# FastAPI is lightweight — import at top level is fine
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
-from openai import OpenAI
 
-from reportlab.lib.pagesizes import letter
-from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT, TA_JUSTIFY
-from reportlab.lib.styles import ParagraphStyle
-from reportlab.lib.colors import black
-from reportlab.platypus import (
-    SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable
-)
-from reportlab.pdfbase import pdfmetrics
-from reportlab.pdfbase.ttfonts import TTFont
-from reportlab.platypus.frames import Frame
-from reportlab.platypus.doctemplate import PageTemplate
-from pypdf import PdfReader
-
-# ── Paths ─────────────────────────────────────────────────────────────────────
-# Fonts live in api/fonts/ — co-located with the function so Vercel bundles them
-FONTS_DIR = Path(__file__).parent / "fonts"
-
-# ── Font Registration (lazy — called per request, not at import time) ──────────
-_fonts_registered = False
-
-def _ensure_fonts():
-    global _fonts_registered
-    if _fonts_registered:
-        return
-    font_map = {
-        "Carlito":            "Carlito-Regular.ttf",
-        "Carlito-Bold":       "Carlito-Bold.ttf",
-        "Carlito-Italic":     "Carlito-Italic.ttf",
-        "Carlito-BoldItalic": "Carlito-BoldItalic.ttf",
-    }
-    for name, fname in font_map.items():
-        path = FONTS_DIR / fname
-        if not path.exists():
-            raise FileNotFoundError(f"Font missing: {path}")
-        try:
-            pdfmetrics.registerFont(TTFont(name, str(path)))
-        except Exception:
-            pass  # Already registered in a warm Lambda instance
-    pdfmetrics.registerFontFamily(
-        "Carlito",
-        normal="Carlito",
-        bold="Carlito-Bold",
-        italic="Carlito-Italic",
-        boldItalic="Carlito-BoldItalic",
-    )
-    _fonts_registered = True
-
-# ── Claude / Blackbox.ai ───────────────────────────────────────────────────────
+# ── Constants ──────────────────────────────────────────────────────────────────
+FONTS_DIR        = Path(__file__).parent / "fonts"
 BLACKBOX_API_KEY = os.environ.get("BLACKBOX_API_KEY", "sk-955jZX5iIrvkQxUvuwbubQ")
 CLAUDE_MODEL     = "claude-sonnet-4-5-20250514"
-
-ai_client = OpenAI(
-    api_key=BLACKBOX_API_KEY,
-    base_url="https://api.blackbox.ai/v1",
-)
 
 # ── FastAPI App ────────────────────────────────────────────────────────────────
 app = FastAPI(title="Resume Tailoring System")
 
 # ── Request Model ──────────────────────────────────────────────────────────────
 class TailorRequest(BaseModel):
-    base_script:      str = ""
-    jd_api_endpoint:  str = ""
-    jd_api_key:       str = ""
-    job_id:           str = ""
-    jd_raw:           str = ""
-    candidate_name:   str = "BHARATH KUMAR RAJESH"
-    target_role:      str = ""
-    company_name:     str = ""
+    base_script:     str = ""
+    jd_api_endpoint: str = ""
+    jd_api_key:      str = ""
+    job_id:          str = ""
+    jd_raw:          str = ""
+    candidate_name:  str = "BHARATH KUMAR RAJESH"
+    target_role:     str = ""
+    company_name:    str = ""
 
-# ── Job Description Fetching ───────────────────────────────────────────────────
+# ── Lazy Font Registration ────────────────────────────────────────────────────
+_fonts_registered = False
+
+def _ensure_fonts():
+    global _fonts_registered
+    if _fonts_registered:
+        return
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+    for name, fname in [
+        ("Carlito",            "Carlito-Regular.ttf"),
+        ("Carlito-Bold",       "Carlito-Bold.ttf"),
+        ("Carlito-Italic",     "Carlito-Italic.ttf"),
+        ("Carlito-BoldItalic", "Carlito-BoldItalic.ttf"),
+    ]:
+        path = FONTS_DIR / fname
+        if not path.exists():
+            raise FileNotFoundError(f"Font not found: {path}")
+        try:
+            pdfmetrics.registerFont(TTFont(name, str(path)))
+        except Exception:
+            pass
+    pdfmetrics.registerFontFamily(
+        "Carlito", normal="Carlito", bold="Carlito-Bold",
+        italic="Carlito-Italic", boldItalic="Carlito-BoldItalic",
+    )
+    _fonts_registered = True
+
+# ── AI Client (lazy) ──────────────────────────────────────────────────────────
+_ai_client = None
+
+def _get_ai_client():
+    global _ai_client
+    if _ai_client is None:
+        from openai import OpenAI
+        _ai_client = OpenAI(
+            api_key=BLACKBOX_API_KEY,
+            base_url="https://api.blackbox.ai/v1",
+        )
+    return _ai_client
+
+# ── Job Description Fetching ──────────────────────────────────────────────────
 def fetch_job_description(endpoint: str, api_key: str, job_id: str) -> str:
+    import requests as http_requests
     headers = {"Accept": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
-
     urls = [
         f"{endpoint.rstrip('/')}/{job_id}",
         f"{endpoint.rstrip('/')}?job_id={job_id}",
-        f"{endpoint.rstrip('/')}?id={job_id}",
         job_id if job_id.startswith("http") else None,
     ]
-    last_err = None
     for url in urls:
         if not url:
             continue
@@ -108,12 +95,11 @@ def fetch_job_description(endpoint: str, api_key: str, job_id: str) -> str:
                     return json.dumps(resp.json(), indent=2)
                 except Exception:
                     return resp.text
-        except Exception as e:
-            last_err = e
+        except Exception:
+            pass
+    raise HTTPException(status_code=502, detail="Could not fetch job description from API.")
 
-    raise HTTPException(status_code=502, detail=f"Could not fetch JD from API: {last_err}")
-
-# ── Claude Prompt ──────────────────────────────────────────────────────────────
+# ── Claude System Prompt ──────────────────────────────────────────────────────
 SYSTEM_PROMPT = """You are an elite technical resume writer and ATS optimization specialist.
 
 Given a base resume's data and a job description, produce a tailored JSON resume object.
@@ -126,7 +112,7 @@ RULES:
 5. KEEP all existing metrics (percentages, response times, user counts, uptime %).
 6. ATS optimization: naturally embed JD keywords without stuffing.
 7. Keep bullets concise — each must fit in ~2-3 lines on a single-page PDF.
-8. Single-page constraint: if condensing is needed, shorten bullets not cut them entirely.
+8. Single-page constraint: shorten bullets if needed, do not cut them entirely.
 
 OUTPUT FORMAT — return ONLY valid JSON, no markdown, no code fences:
 {
@@ -143,7 +129,7 @@ OUTPUT FORMAT — return ONLY valid JSON, no markdown, no code fences:
     }
   ],
   "projects": [
-    { "name": "Project Name | Tech Stack", "year": "YYYY", "bullets": ["bullet 1"] }
+    { "name": "Project Name | Tech Stack", "year": "YYYY", "bullets": ["bullet"] }
   ],
   "education": [
     { "school": "University", "location": "City, ST", "degree": "Degree | GPA", "start": "Mon YYYY", "end": "Mon YYYY" }
@@ -234,17 +220,15 @@ def base_resume_data() -> dict:
 def call_claude(jd_text: str, base_data: dict, target_role: str, company_name: str) -> dict:
     role_hint    = f"\n\nTARGET ROLE: {target_role}"    if target_role    else ""
     company_hint = f"\nTARGET COMPANY: {company_name}" if company_name   else ""
-
     user_msg = (
         f"BASE RESUME DATA (JSON):\n{json.dumps(base_data, indent=2)}"
         f"\n\nJOB DESCRIPTION:\n{jd_text}"
         f"{role_hint}{company_hint}"
         "\n\nTailor the resume. Return ONLY valid JSON."
     )
-    response = ai_client.chat.completions.create(
-        model=CLAUDE_MODEL,
-        max_tokens=4096,
-        temperature=0.3,
+    client = _get_ai_client()
+    response = client.chat.completions.create(
+        model=CLAUDE_MODEL, max_tokens=4096, temperature=0.3,
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user",   "content": user_msg},
@@ -252,7 +236,7 @@ def call_claude(jd_text: str, base_data: dict, target_role: str, company_name: s
     )
     raw = response.choices[0].message.content.strip()
     raw = re.sub(r"^```(?:json)?\s*", "", raw)
-    raw = re.sub(r"\s*```$",          "", raw)
+    raw = re.sub(r"\s*```$",           "", raw)
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
@@ -261,21 +245,30 @@ def call_claude(jd_text: str, base_data: dict, target_role: str, company_name: s
             return json.loads(m.group())
         raise ValueError(f"Claude returned invalid JSON. Raw: {raw[:400]}")
 
-# ── PDF Builder ────────────────────────────────────────────────────────────────
-PAGE_WIDTH, PAGE_HEIGHT = letter
-LM = 30; RM = PAGE_WIDTH - 582; TM = 18; BM = 12
-CW = PAGE_WIDTH - LM - RM
-
+# ── PDF Builder (all reportlab imports deferred) ───────────────────────────────
 def build_pdf_to_bytes(tailored: dict, candidate_name: str) -> bytes:
-    """Build PDF entirely in memory and return bytes."""
-    _ensure_fonts()  # Register fonts lazily (safe for Vercel cold starts)
-    ns  = ParagraphStyle("N",  fontName="Carlito-Bold",    fontSize=13, alignment=TA_CENTER,  spaceAfter=0,   leading=14)
-    cs_ = ParagraphStyle("C",  fontName="Carlito",         fontSize=9,  alignment=TA_CENTER,  spaceAfter=0,   leading=11)
-    ss  = ParagraphStyle("S",  fontName="Carlito-Bold",    fontSize=10, alignment=TA_LEFT,    spaceBefore=0,  spaceAfter=0, leading=11)
-    bst = ParagraphStyle("B",  fontName="Carlito",         fontSize=9,  alignment=TA_JUSTIFY, leading=10.8,   leftIndent=10, firstLineIndent=0, spaceAfter=0.5)
-    kst = ParagraphStyle("K",  fontName="Carlito",         fontSize=9,  alignment=TA_LEFT,    leading=11,     spaceAfter=0)
-    ust = ParagraphStyle("U",  fontName="Carlito",         fontSize=9,  alignment=TA_JUSTIFY, leading=10.8,   spaceAfter=0)
-    cwst= ParagraphStyle("CW", fontName="Carlito",         fontSize=9,  leading=11,           spaceAfter=2)
+    _ensure_fonts()
+    from reportlab.lib.pagesizes import letter
+    from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT, TA_JUSTIFY
+    from reportlab.lib.styles import ParagraphStyle
+    from reportlab.lib.colors import black
+    from reportlab.platypus import (
+        SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable
+    )
+    from reportlab.platypus.frames import Frame
+    from reportlab.platypus.doctemplate import PageTemplate
+
+    PAGE_WIDTH, PAGE_HEIGHT = letter
+    LM = 30; RM = PAGE_WIDTH - 582; TM = 18; BM = 12
+    CW = PAGE_WIDTH - LM - RM
+
+    ns  = ParagraphStyle("N",  fontName="Carlito-Bold", fontSize=13, alignment=TA_CENTER,  spaceAfter=0, leading=14)
+    cs_ = ParagraphStyle("C",  fontName="Carlito",      fontSize=9,  alignment=TA_CENTER,  spaceAfter=0, leading=11)
+    ss  = ParagraphStyle("S",  fontName="Carlito-Bold", fontSize=10, alignment=TA_LEFT,    spaceBefore=0, spaceAfter=0, leading=11)
+    bst = ParagraphStyle("B",  fontName="Carlito",      fontSize=9,  alignment=TA_JUSTIFY, leading=10.8, leftIndent=10, firstLineIndent=0, spaceAfter=0.5)
+    kst = ParagraphStyle("K",  fontName="Carlito",      fontSize=9,  alignment=TA_LEFT,    leading=11, spaceAfter=0)
+    ust = ParagraphStyle("U",  fontName="Carlito",      fontSize=9,  alignment=TA_JUSTIFY, leading=10.8, spaceAfter=0)
+    cwst= ParagraphStyle("CW", fontName="Carlito",      fontSize=9,  leading=11, spaceAfter=2)
 
     story = []
 
@@ -288,7 +281,7 @@ def build_pdf_to_bytes(tailored: dict, candidate_name: str) -> bytes:
         r = ParagraphStyle("R", fontName=rf, fontSize=9, leading=11, alignment=TA_RIGHT)
         t = Table([[Paragraph(lt, l), Paragraph(rt, r)]], colWidths=[CW*0.73, CW*0.27])
         t.setStyle(TableStyle([
-            ("VALIGN", (0,0),(-1,-1),"TOP"), ("LEFTPADDING",(0,0),(-1,-1),0),
+            ("VALIGN",(0,0),(-1,-1),"TOP"), ("LEFTPADDING",(0,0),(-1,-1),0),
             ("RIGHTPADDING",(0,0),(-1,-1),0), ("TOPPADDING",(0,0),(-1,-1),0),
             ("BOTTOMPADDING",(0,0),(-1,-1),0),
         ]))
@@ -302,7 +295,6 @@ def build_pdf_to_bytes(tailored: dict, candidate_name: str) -> bytes:
     def sk(label, items): story.append(Paragraph(f"<b>{label}</b> {items}", kst))
     def ct(t):        story.append(Paragraph(t, kst))
 
-    # Header
     story.append(Paragraph(candidate_name.upper(), ns))
     story.append(Spacer(1, 1))
     story.append(Paragraph("New York, NY | (551) 371-2918 | bharath.kr702@gmail.com", cs_))
@@ -350,7 +342,6 @@ def build_pdf_to_bytes(tailored: dict, candidate_name: str) -> bytes:
     for cert in tailored.get("certifications", []):
         ct(cert)
 
-    # Build to bytes (BytesIO — no disk write)
     buf = io.BytesIO()
     doc = SimpleDocTemplate(
         buf, pagesize=letter,
@@ -364,24 +355,140 @@ def build_pdf_to_bytes(tailored: dict, candidate_name: str) -> bytes:
     return buf.read()
 
 def count_pages(pdf_bytes: bytes) -> int:
+    from pypdf import PdfReader
     return len(PdfReader(io.BytesIO(pdf_bytes)).pages)
 
 def condense_with_claude(tailored: dict) -> dict:
     msg = (
         "The resume overflowed to 2 pages. Condense bullet points so each is 1-2 lines max. "
-        "Preserve all key metrics and tech keywords. Return ONLY the same JSON structure, condensed.\n\n"
+        "Preserve all key metrics and tech keywords. Return ONLY the same JSON structure.\n\n"
         f"CURRENT JSON:\n{json.dumps(tailored, indent=2)}"
     )
-    response = ai_client.chat.completions.create(
+    client = _get_ai_client()
+    response = client.chat.completions.create(
         model=CLAUDE_MODEL, max_tokens=3000, temperature=0.2,
         messages=[{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": msg}],
     )
     raw = response.choices[0].message.content.strip()
     raw = re.sub(r"^```(?:json)?\s*", "", raw)
-    raw = re.sub(r"\s*```$",          "", raw)
+    raw = re.sub(r"\s*```$",           "", raw)
     return json.loads(raw)
 
-# ── API Endpoints ──────────────────────────────────────────────────────────────
+def _generate_script(tailored: dict, candidate_name: str) -> str:
+    lines = [
+        "from reportlab.lib.pagesizes import letter",
+        "from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT, TA_JUSTIFY",
+        "from reportlab.lib.styles import ParagraphStyle",
+        "from reportlab.lib.colors import black",
+        "from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable)",
+        "from reportlab.pdfbase import pdfmetrics",
+        "from reportlab.pdfbase.ttfonts import TTFont",
+        "from reportlab.platypus.frames import Frame",
+        "from reportlab.platypus.doctemplate import PageTemplate",
+        "from pathlib import Path",
+        "",
+        "FONTS_DIR = Path(__file__).parent / 'fonts'",
+        "for name, fname in [('Carlito','Carlito-Regular.ttf'),('Carlito-Bold','Carlito-Bold.ttf'),('Carlito-Italic','Carlito-Italic.ttf'),('Carlito-BoldItalic','Carlito-BoldItalic.ttf')]:",
+        "    pdfmetrics.registerFont(TTFont(name, str(FONTS_DIR / fname)))",
+        "pdfmetrics.registerFontFamily('Carlito', normal='Carlito', bold='Carlito-Bold', italic='Carlito-Italic', boldItalic='Carlito-BoldItalic')",
+        "",
+        "PAGE_WIDTH, PAGE_HEIGHT = letter",
+        "LM = 30; RM = PAGE_WIDTH - 582; TM = 18; BM = 12; CW = PAGE_WIDTH - LM - RM",
+        "",
+        "ns  = ParagraphStyle('N',  fontName='Carlito-Bold', fontSize=13, alignment=TA_CENTER,  spaceAfter=0, leading=14)",
+        "cs_ = ParagraphStyle('C',  fontName='Carlito',      fontSize=9,  alignment=TA_CENTER,  spaceAfter=0, leading=11)",
+        "ss  = ParagraphStyle('S',  fontName='Carlito-Bold', fontSize=10, alignment=TA_LEFT,    spaceBefore=0, spaceAfter=0, leading=11)",
+        "bst = ParagraphStyle('B',  fontName='Carlito',      fontSize=9,  alignment=TA_JUSTIFY, leading=10.8, leftIndent=10, firstLineIndent=0, spaceAfter=0.5)",
+        "kst = ParagraphStyle('K',  fontName='Carlito',      fontSize=9,  alignment=TA_LEFT,    leading=11, spaceAfter=0)",
+        "ust = ParagraphStyle('U',  fontName='Carlito',      fontSize=9,  alignment=TA_JUSTIFY, leading=10.8, spaceAfter=0)",
+        "cwst= ParagraphStyle('CW', fontName='Carlito',      fontSize=9,  leading=11, spaceAfter=2)",
+        "story = []",
+        "def sh(t):",
+        "    story.append(Spacer(1,3)); story.append(Paragraph(t,ss)); story.append(Spacer(1,1))",
+        '    story.append(HRFlowable(width="100%",thickness=0.5,color=black,spaceAfter=2,spaceBefore=0))',
+        'def tc(lt,rt,lf="Carlito-Bold",rf="Carlito-Bold"):',
+        '    l=ParagraphStyle("L",fontName=lf,fontSize=9,leading=11,alignment=TA_LEFT)',
+        '    r=ParagraphStyle("R",fontName=rf,fontSize=9,leading=11,alignment=TA_RIGHT)',
+        "    t=Table([[Paragraph(lt,l),Paragraph(rt,r)]],colWidths=[CW*0.73,CW*0.27])",
+        '    t.setStyle(TableStyle([("VALIGN",(0,0),(-1,-1),"TOP"),("LEFTPADDING",(0,0),(-1,-1),0),("RIGHTPADDING",(0,0),(-1,-1),0),("TOPPADDING",(0,0),(-1,-1),0),("BOTTOMPADDING",(0,0),(-1,-1),0)]))',
+        "    story.append(t)",
+        'def rl(t,d): tc(t,d)',
+        'def cl(c,l): tc(c,l,"Carlito-Italic","Carlito-Italic")',
+        'def ed(d,dt): tc(d,dt,"Carlito-Italic","Carlito-Italic")',
+        r'def b(t): story.append(Paragraph(f"\u2022  {t}",bst))',
+        'def pl(t,y): tc(t,y)',
+        'def sk(label,items): story.append(Paragraph(f"<b>{label}</b> {items}",kst))',
+        'def ct(t): story.append(Paragraph(t,kst))',
+        "",
+    ]
+
+    def esc(s):
+        return s.replace("\\", "\\\\").replace("'", "\\'")
+
+    name_esc    = esc(candidate_name.upper())
+    summary_esc = esc(tailored.get("summary", ""))
+
+    lines.append("story.append(Paragraph('" + name_esc + "', ns))")
+    lines.append("story.append(Spacer(1, 1))")
+    lines.append("story.append(Paragraph('New York, NY | (551) 371-2918 | bharath.kr702@gmail.com', cs_))")
+    lines.append("story.append(Paragraph('<link href=\"https://linkedin.com/in/thebharathkumar\" color=\"blue\"><u>LinkedIn</u></link> | <link href=\"https://github.com/thebharathkumar\" color=\"blue\"><u>GitHub</u></link> | <link href=\"https://thebharath.co\" color=\"blue\"><u>thebharath.co</u></link>', cs_))")
+    lines.append("")
+    lines.append("sh('SUMMARY')")
+    lines.append("story.append(Paragraph('" + summary_esc + "', ust))")
+    lines.append("")
+
+    lines.append("sh('EDUCATION')")
+    for edu in tailored.get("education", []):
+        lines.append("rl('" + esc(edu["school"]) + "', '" + esc(edu["location"]) + "')")
+        lines.append("ed('" + esc(edu["degree"]) + "', '" + esc(edu["start"]) + " - " + esc(edu["end"]) + "')")
+        if "Pace" in edu["school"]:
+            lines.append("story.append(Paragraph('Coursework: Algorithms, Data Structures, Software Design, Distributed Systems, Cloud Computing, Database Architecture', cwst))")
+    lines.append("")
+
+    lines.append("sh('TECHNICAL SKILLS')")
+    for lbl, items in tailored.get("skills", {}).items():
+        lines.append("sk('" + esc(lbl) + ":', ' " + esc(items) + "')")
+    lines.append("")
+
+    lines.append("sh('EXPERIENCE')")
+    exps = tailored.get("experience", [])
+    for i, exp in enumerate(exps):
+        lines.append("rl('" + esc(exp["role"]) + "', '" + esc(exp["start"]) + " - " + esc(exp["end"]) + "')")
+        lines.append("cl('" + esc(exp["company"]) + "', '" + esc(exp["location"]) + "')")
+        for bullet in exp.get("bullets", []):
+            lines.append("b('" + esc(bullet) + "')")
+        if i < len(exps) - 1:
+            lines.append("story.append(Spacer(1, 2))")
+    lines.append("")
+
+    lines.append("sh('PROJECTS')")
+    projs = tailored.get("projects", [])
+    for i, proj in enumerate(projs):
+        lines.append("pl('" + esc(proj["name"]) + "', '" + esc(proj.get("year","")) + "')")
+        for bullet in proj.get("bullets", []):
+            lines.append("b('" + esc(bullet) + "')")
+        if i < len(projs) - 1:
+            lines.append("story.append(Spacer(1, 1))")
+    lines.append("")
+
+    lines.append("sh('CERTIFICATIONS & PUBLICATIONS')")
+    for cert in tailored.get("certifications", []):
+        lines.append("ct('" + esc(cert) + "')")
+    lines.append("")
+
+    out = "Bharath_Kumar_Tailored_Resume.pdf"
+    lines += [
+        "doc = SimpleDocTemplate('" + out + "', pagesize=letter, leftMargin=LM, rightMargin=RM, topMargin=TM, bottomMargin=BM)",
+        "frame = Frame(LM, BM, CW, PAGE_HEIGHT-TM-BM, leftPadding=0, rightPadding=0, topPadding=0, bottomPadding=0, id='main')",
+        "doc.addPageTemplates([PageTemplate(id='main', frames=[frame])])",
+        "doc.build(story)",
+        "from pypdf import PdfReader",
+        "p = len(PdfReader('" + out + "').pages)",
+        "print(f'Pages: {p} OK' if p == 1 else f'Pages: {p} OVER')",
+    ]
+    return "\n".join(lines)
+
+# ── API Endpoints ─────────────────────────────────────────────────────────────
 @app.get("/health")
 async def health():
     font_files = list(FONTS_DIR.glob("*.ttf")) if FONTS_DIR.exists() else []
@@ -405,7 +512,6 @@ async def tailor_resume(req: TailorRequest):
         tailored = call_claude(jd_text, base_resume_data(), req.target_role, req.company_name)
         changes  = tailored.get("changes_summary", "Resume tailored successfully.")
 
-        # Generate PDF in-memory with overflow retry
         pages = 2
         for attempt in range(3):
             pdf_bytes = build_pdf_to_bytes(tailored, req.candidate_name)
@@ -415,7 +521,6 @@ async def tailor_resume(req: TailorRequest):
             if attempt < 2:
                 tailored = condense_with_claude(tailored)
             else:
-                # Last resort: trim longest experience bullets
                 for exp in tailored.get("experience", []):
                     if len(exp.get("bullets", [])) > 2:
                         exp["bullets"] = exp["bullets"][:-1]
@@ -447,161 +552,12 @@ async def get_script(req: TailorRequest):
             raise HTTPException(status_code=400, detail="No job description provided.")
 
         tailored = call_claude(jd_text, base_resume_data(), req.target_role, req.company_name)
-        changes  = tailored.get("changes_summary", "Resume tailored successfully.")
-        script   = _generate_script(tailored, req.candidate_name)
-
-        return JSONResponse({"script": script, "changes_summary": changes})
+        return JSONResponse({
+            "script": _generate_script(tailored, req.candidate_name),
+            "changes_summary": tailored.get("changes_summary", ""),
+        })
     except HTTPException:
         raise
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
-
-def _generate_script(tailored: dict, candidate_name: str) -> str:
-    lines = [
-        "from reportlab.lib.pagesizes import letter",
-        "from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT, TA_JUSTIFY",
-        "from reportlab.lib.styles import ParagraphStyle",
-        "from reportlab.lib.colors import black",
-        "from reportlab.platypus import (",
-        "    SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable",
-        ")",
-        "from reportlab.pdfbase import pdfmetrics",
-        "from reportlab.pdfbase.ttfonts import TTFont",
-        "from reportlab.platypus.frames import Frame",
-        "from reportlab.platypus.doctemplate import PageTemplate",
-        "from pathlib import Path",
-        "",
-        "FONTS_DIR = Path(__file__).parent / 'fonts'",
-        "pdfmetrics.registerFont(TTFont('Carlito',            str(FONTS_DIR / 'Carlito-Regular.ttf')))",
-        "pdfmetrics.registerFont(TTFont('Carlito-Bold',       str(FONTS_DIR / 'Carlito-Bold.ttf')))",
-        "pdfmetrics.registerFont(TTFont('Carlito-Italic',     str(FONTS_DIR / 'Carlito-Italic.ttf')))",
-        "pdfmetrics.registerFont(TTFont('Carlito-BoldItalic', str(FONTS_DIR / 'Carlito-BoldItalic.ttf')))",
-        "pdfmetrics.registerFontFamily('Carlito', normal='Carlito', bold='Carlito-Bold',",
-        "                               italic='Carlito-Italic', boldItalic='Carlito-BoldItalic')",
-        "",
-        "PAGE_WIDTH, PAGE_HEIGHT = letter",
-        "LM = 30; RM = PAGE_WIDTH - 582; TM = 18; BM = 12",
-        "CW = PAGE_WIDTH - LM - RM",
-        "",
-        "ns  = ParagraphStyle('N',  fontName='Carlito-Bold',    fontSize=13, alignment=TA_CENTER,  spaceAfter=0, leading=14)",
-        "cs_ = ParagraphStyle('C',  fontName='Carlito',         fontSize=9,  alignment=TA_CENTER,  spaceAfter=0, leading=11)",
-        "ss  = ParagraphStyle('S',  fontName='Carlito-Bold',    fontSize=10, alignment=TA_LEFT,    spaceBefore=0, spaceAfter=0, leading=11)",
-        "bst = ParagraphStyle('B',  fontName='Carlito',         fontSize=9,  alignment=TA_JUSTIFY, leading=10.8, leftIndent=10, firstLineIndent=0, spaceAfter=0.5)",
-        "kst = ParagraphStyle('K',  fontName='Carlito',         fontSize=9,  alignment=TA_LEFT,    leading=11, spaceAfter=0)",
-        "ust = ParagraphStyle('U',  fontName='Carlito',         fontSize=9,  alignment=TA_JUSTIFY, leading=10.8, spaceAfter=0)",
-        "cwst= ParagraphStyle('CW', fontName='Carlito',         fontSize=9,  leading=11, spaceAfter=2)",
-        "",
-        "story = []",
-        "",
-        "def sh(t):",
-        "    story.append(Spacer(1,3)); story.append(Paragraph(t,ss)); story.append(Spacer(1,1))",
-        '    story.append(HRFlowable(width="100%",thickness=0.5,color=black,spaceAfter=2,spaceBefore=0))',
-        "",
-        'def tc(lt,rt,lf="Carlito-Bold",rf="Carlito-Bold"):',
-        '    l=ParagraphStyle("L",fontName=lf,fontSize=9,leading=11,alignment=TA_LEFT)',
-        '    r=ParagraphStyle("R",fontName=rf,fontSize=9,leading=11,alignment=TA_RIGHT)',
-        "    t=Table([[Paragraph(lt,l),Paragraph(rt,r)]],colWidths=[CW*0.73,CW*0.27])",
-        '    t.setStyle(TableStyle([("VALIGN",(0,0),(-1,-1),"TOP"),("LEFTPADDING",(0,0),(-1,-1),0),("RIGHTPADDING",(0,0),(-1,-1),0),("TOPPADDING",(0,0),(-1,-1),0),("BOTTOMPADDING",(0,0),(-1,-1),0)]))',
-        "    story.append(t)",
-        "",
-        'def rl(t,d): tc(t,d)',
-        'def cl(c,l): tc(c,l,"Carlito-Italic","Carlito-Italic")',
-        'def ed(d,dt): tc(d,dt,"Carlito-Italic","Carlito-Italic")',
-        r'def b(t): story.append(Paragraph(f"\u2022  {t}",bst))',
-        'def pl(t,y): tc(t,y)',
-        'def sk(label,items): story.append(Paragraph(f"<b>{label}</b> {items}",kst))',
-        'def ct(t): story.append(Paragraph(t,kst))',
-        "",
-    ]
-
-    def esc(s):
-        return s.replace("\\", "\\\\").replace("'", "\\'")
-
-    # Pre-compute all escaped values (Python 3.9: no backslash inside f-string {})
-    name_esc = esc(candidate_name.upper())
-    lines.append("story.append(Paragraph('" + name_esc + "', ns))")
-    lines.append("story.append(Spacer(1, 1))")
-    lines.append("story.append(Paragraph('New York, NY | (551) 371-2918 | bharath.kr702@gmail.com', cs_))")
-    lines.append(
-        "story.append(Paragraph('<link href=\"https://linkedin.com/in/thebharathkumar\" color=\"blue\"><u>LinkedIn</u></link>"
-        " | <link href=\"https://github.com/thebharathkumar\" color=\"blue\"><u>GitHub</u></link>"
-        " | <link href=\"https://thebharath.co\" color=\"blue\"><u>thebharath.co</u></link>', cs_))"
-    )
-    lines.append("")
-
-    lines.append("sh('SUMMARY')")
-    summary_esc = esc(tailored.get("summary", ""))
-    lines.append("story.append(Paragraph('" + summary_esc + "', ust))")
-    lines.append("")
-
-    lines.append("sh('EDUCATION')")
-    for edu in tailored.get("education", []):
-        school_esc = esc(edu["school"])
-        loc_esc    = esc(edu["location"])
-        deg_esc    = esc(edu["degree"])
-        start_esc  = esc(edu["start"])
-        end_esc    = esc(edu["end"])
-        lines.append("rl('" + school_esc + "', '" + loc_esc + "')")
-        lines.append("ed('" + deg_esc + "', '" + start_esc + " - " + end_esc + "')")
-        if "Pace" in edu["school"]:
-            lines.append("story.append(Paragraph('Coursework: Algorithms, Data Structures, Software Design, Distributed Systems, Cloud Computing, Database Architecture', cwst))")
-    lines.append("")
-
-    lines.append("sh('TECHNICAL SKILLS')")
-    for lbl, items in tailored.get("skills", {}).items():
-        lbl_esc   = esc(lbl)
-        items_esc = esc(items)
-        lines.append("sk('" + lbl_esc + ":', ' " + items_esc + "')")
-    lines.append("")
-
-    lines.append("sh('EXPERIENCE')")
-    exps = tailored.get("experience", [])
-    for i, exp in enumerate(exps):
-        role_esc    = esc(exp["role"])
-        start_esc   = esc(exp["start"])
-        end_esc     = esc(exp["end"])
-        company_esc = esc(exp["company"])
-        exploc_esc  = esc(exp["location"])
-        lines.append("rl('" + role_esc + "', '" + start_esc + " - " + end_esc + "')")
-        lines.append("cl('" + company_esc + "', '" + exploc_esc + "')")
-        for bullet in exp.get("bullets", []):
-            bull_esc = esc(bullet)
-            lines.append("b('" + bull_esc + "')")
-        if i < len(exps) - 1:
-            lines.append("story.append(Spacer(1, 2))")
-    lines.append("")
-
-    lines.append("sh('PROJECTS')")
-    projs = tailored.get("projects", [])
-    for i, proj in enumerate(projs):
-        name_esc = esc(proj["name"])
-        year_esc = esc(proj.get("year", ""))
-        lines.append("pl('" + name_esc + "', '" + year_esc + "')")
-        for bullet in proj.get("bullets", []):
-            bull_esc = esc(bullet)
-            lines.append("b('" + bull_esc + "')")
-        if i < len(projs) - 1:
-            lines.append("story.append(Spacer(1, 1))")
-    lines.append("")
-
-    lines.append("sh('CERTIFICATIONS & PUBLICATIONS')")
-    for cert in tailored.get("certifications", []):
-        cert_esc = esc(cert)
-        lines.append("ct('" + cert_esc + "')")
-    lines.append("")
-
-    out_path = "Bharath_Kumar_Tailored_Resume.pdf"
-    lines += [
-        "doc = SimpleDocTemplate('" + out_path + "',",
-        "    pagesize=letter, leftMargin=LM, rightMargin=RM, topMargin=TM, bottomMargin=BM)",
-        "frame = Frame(LM, BM, CW, PAGE_HEIGHT-TM-BM, leftPadding=0, rightPadding=0, topPadding=0, bottomPadding=0, id='main')",
-        "doc.addPageTemplates([PageTemplate(id='main', frames=[frame])])",
-        "doc.build(story)",
-        "",
-        "from pypdf import PdfReader",
-        "p = len(PdfReader('" + out_path + "').pages)",
-        "print(f'Pages: {p} OK' if p == 1 else f'Pages: {p} OVER')",
-    ]
-    return "\n".join(lines)
-

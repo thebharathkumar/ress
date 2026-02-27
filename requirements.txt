@@ -1,7 +1,6 @@
-fastapi
-uvicorn[standard]
-reportlab
-pypdf
-openai
-requests
-python-multipart
+fastapi==0.115.0
+reportlab==4.2.5
+openai==2.24.0
+pypdf==4.3.0
+requests==2.32.3
+python-multipart==0.0.9
