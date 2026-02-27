@@ -15,7 +15,18 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 # ── Constants ──────────────────────────────────────────────────────────────────
-FONTS_DIR        = Path(__file__).parent / "fonts"
+# Fonts downloaded to /tmp on first request (Vercel's writable temp dir)
+# Falls back to api/fonts/ for local dev
+_LOCAL_FONTS = Path(__file__).parent / "fonts"
+_TMP_FONTS   = Path("/tmp/fonts")
+
+FONT_URLS = {
+    "Carlito-Regular.ttf":     "https://raw.githubusercontent.com/thebharathkumar/ress/main/fonts/Carlito-Regular.ttf",
+    "Carlito-Bold.ttf":        "https://raw.githubusercontent.com/thebharathkumar/ress/main/fonts/Carlito-Bold.ttf",
+    "Carlito-Italic.ttf":      "https://raw.githubusercontent.com/thebharathkumar/ress/main/fonts/Carlito-Italic.ttf",
+    "Carlito-BoldItalic.ttf":  "https://raw.githubusercontent.com/thebharathkumar/ress/main/fonts/Carlito-BoldItalic.ttf",
+}
+
 BLACKBOX_API_KEY = os.environ.get("BLACKBOX_API_KEY", "sk-955jZX5iIrvkQxUvuwbubQ")
 CLAUDE_MODEL     = "claude-sonnet-4-5-20250514"
 
@@ -36,23 +47,34 @@ class TailorRequest(BaseModel):
 # ── Lazy Font Registration ────────────────────────────────────────────────────
 _fonts_registered = False
 
+def _get_fonts_dir() -> Path:
+    """Return local fonts dir (dev) or /tmp/fonts (Vercel), downloading if needed."""
+    if _LOCAL_FONTS.exists() and any(_LOCAL_FONTS.glob("*.ttf")):
+        return _LOCAL_FONTS
+    # Vercel: download to /tmp
+    _TMP_FONTS.mkdir(parents=True, exist_ok=True)
+    import urllib.request
+    for fname, url in FONT_URLS.items():
+        dest = _TMP_FONTS / fname
+        if not dest.exists():
+            urllib.request.urlretrieve(url, str(dest))
+    return _TMP_FONTS
+
 def _ensure_fonts():
     global _fonts_registered
     if _fonts_registered:
         return
     from reportlab.pdfbase import pdfmetrics
     from reportlab.pdfbase.ttfonts import TTFont
+    fonts_dir = _get_fonts_dir()
     for name, fname in [
         ("Carlito",            "Carlito-Regular.ttf"),
         ("Carlito-Bold",       "Carlito-Bold.ttf"),
         ("Carlito-Italic",     "Carlito-Italic.ttf"),
         ("Carlito-BoldItalic", "Carlito-BoldItalic.ttf"),
     ]:
-        path = FONTS_DIR / fname
-        if not path.exists():
-            raise FileNotFoundError(f"Font not found: {path}")
         try:
-            pdfmetrics.registerFont(TTFont(name, str(path)))
+            pdfmetrics.registerFont(TTFont(name, str(fonts_dir / fname)))
         except Exception:
             pass
     pdfmetrics.registerFontFamily(
@@ -60,6 +82,7 @@ def _ensure_fonts():
         italic="Carlito-Italic", boldItalic="Carlito-BoldItalic",
     )
     _fonts_registered = True
+
 
 # ── AI Client (lazy) ──────────────────────────────────────────────────────────
 _ai_client = None
