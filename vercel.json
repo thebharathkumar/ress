@@ -1,40 +1,22 @@
 {
-    "builds": [
-        {
-            "src": "api/index.py",
-            "use": "@vercel/python",
-            "config": {
-                "maxLambdaSize": "50mb",
-                "includeFiles": [
-                    "fonts/**"
-                ]
-            }
+    "functions": {
+        "api/index.py": {
+            "maxDuration": 60,
+            "includeFiles": "fonts/**"
         }
-    ],
-    "routes": [
+    },
+    "rewrites": [
         {
-            "src": "/tailor",
-            "dest": "/api/index.py"
+            "source": "/tailor",
+            "destination": "/api/index"
         },
         {
-            "src": "/script",
-            "dest": "/api/index.py"
+            "source": "/script",
+            "destination": "/api/index"
         },
         {
-            "src": "/health",
-            "dest": "/api/index.py"
-        },
-        {
-            "src": "/styles.css",
-            "dest": "/public/styles.css"
-        },
-        {
-            "src": "/app.js",
-            "dest": "/public/app.js"
-        },
-        {
-            "src": "/",
-            "dest": "/public/index.html"
+            "source": "/health",
+            "destination": "/api/index"
         }
     ]
 }
