@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AI Resume Tailor — Powered by Claude</title>
+  <meta name="description" content="Automatically tailor your resume to any job description using Claude AI. Generate an ATS-optimized, single-page PDF in seconds." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+
+  <!-- Background orbs -->
+  <div class="bg-orb orb-1"></div>
+  <div class="bg-orb orb-2"></div>
+  <div class="bg-orb orb-3"></div>
+
+  <!-- Header -->
+  <header class="header">
+    <div class="header-inner">
+      <div class="logo">
+        <div class="logo-icon">⚡</div>
+        <div>
+          <div class="logo-title">Resume AI</div>
+          <div class="logo-sub">Powered by Claude Opus</div>
+        </div>
+      </div>
+      <div class="header-badge">
+        <span class="badge-dot"></span>
+        ATS-Optimized · Single-Page · Real-time
+      </div>
+    </div>
+  </header>
+
+  <!-- Main -->
+  <main class="main">
+    <div class="hero">
+      <h1 class="hero-title">Tailor Your Resume with <span class="gradient-text">Claude AI</span></h1>
+      <p class="hero-sub">Paste a job description (or connect an API), and Claude rewrites your resume bullet points to match — ATS-optimized, one-page, downloadable PDF.</p>
+    </div>
+
+    <form id="tailor-form" class="form-grid" novalidate>
+
+      <!-- Column 1: API Config + Override -->
+      <div class="col col-left">
+
+        <div class="card">
+          <div class="card-header">
+            <div class="card-icon">🔗</div>
+            <div>
+              <div class="card-title">Job Description Source</div>
+              <div class="card-sub">Paste directly or connect an API</div>
+            </div>
+          </div>
+
+          <div class="tab-row" id="jd-tabs">
+            <button type="button" class="tab active" data-tab="paste">Paste JD</button>
+            <button type="button" class="tab" data-tab="api">API Fetch</button>
+          </div>
+
+          <!-- Paste tab -->
+          <div class="tab-pane active" id="tab-paste">
+            <div class="field">
+              <label for="jd-raw">Job Description <span class="req">*</span></label>
+              <textarea id="jd-raw" name="jd_raw" rows="12" placeholder="Paste the full job description here…"></textarea>
+            </div>
+          </div>
+
+          <!-- API tab -->
+          <div class="tab-pane" id="tab-api">
+            <div class="field">
+              <label for="jd-endpoint">API Endpoint</label>
+              <input type="url" id="jd-endpoint" name="jd_api_endpoint" placeholder="https://api.example.com/v1/jobs" />
+            </div>
+            <div class="field">
+              <label for="jd-apikey">API Key</label>
+              <input type="password" id="jd-apikey" name="jd_api_key" placeholder="Bearer token / API key" />
+              <span class="field-hint">Sent as Authorization: Bearer {key}</span>
+            </div>
+            <div class="field">
+              <label for="job-id">Job ID or Job URL <span class="req">*</span></label>
+              <input type="text" id="job-id" name="job_id" placeholder="123456 or https://..." />
+            </div>
+          </div>
+        </div>
+
+        <!-- Overrides -->
+        <div class="card">
+          <div class="card-header">
+            <div class="card-icon">🎯</div>
+            <div>
+              <div class="card-title">Targeting Overrides</div>
+              <div class="card-sub">Optional — helps Claude focus the tailoring</div>
+            </div>
+          </div>
+
+          <div class="field">
+            <label for="candidate-name">Candidate Name</label>
+            <input type="text" id="candidate-name" name="candidate_name" value="BHARATH KUMAR RAJESH" />
+          </div>
+          <div class="fields-row">
+            <div class="field">
+              <label for="target-role">Target Role</label>
+              <input type="text" id="target-role" name="target_role" placeholder="e.g. Senior Software Engineer" />
+            </div>
+            <div class="field">
+              <label for="company-name">Company</label>
+              <input type="text" id="company-name" name="company_name" placeholder="e.g. Google" />
+            </div>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- Column 2: Base Script + Actions -->
+      <div class="col col-right">
+
+        <div class="card card-script">
+          <div class="card-header">
+            <div class="card-icon">📄</div>
+            <div>
+              <div class="card-title">Base Resume Script</div>
+              <div class="card-sub">Your ReportLab Python script — pre-filled</div>
+            </div>
+            <button type="button" class="btn-icon" id="reset-script-btn" title="Reset to default">↺</button>
+          </div>
+          <textarea id="base-script" name="base_script" rows="22" class="mono" spellcheck="false"></textarea>
+        </div>
+
+        <!-- Action Buttons -->
+        <div class="action-row">
+          <button type="submit" id="generate-btn" class="btn btn-primary" form="tailor-form">
+            <span class="btn-icon-span">✨</span>
+            <span id="btn-label">Generate Tailored PDF</span>
+            <div class="btn-shimmer"></div>
+          </button>
+          <button type="button" id="script-btn" class="btn btn-secondary">
+            <span class="btn-icon-span">📝</span>
+            Get Python Script
+          </button>
+        </div>
+
+      </div>
+
+    </form>
+
+    <!-- Results Panel -->
+    <div id="results-panel" class="results-panel hidden">
+      <div class="results-inner">
+        <div class="results-icon">✅</div>
+        <div class="results-content">
+          <div class="results-title">Resume Tailored Successfully</div>
+          <div id="changes-summary" class="results-body"></div>
+          <div id="page-badge" class="page-badge">📄 1 Page · ATS Ready</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Error Panel -->
+    <div id="error-panel" class="error-panel hidden">
+      <div class="error-inner">
+        <div class="error-icon">⚠️</div>
+        <div class="error-content">
+          <div class="error-title">Tailoring Failed</div>
+          <div id="error-body" class="error-body"></div>
+        </div>
+        <button type="button" id="error-close" class="btn-close">✕</button>
+      </div>
+    </div>
+
+    <!-- Script Modal -->
+    <div id="script-modal" class="modal-overlay hidden">
+      <div class="modal">
+        <div class="modal-header">
+          <div class="modal-title">Tailored Python Script</div>
+          <div class="modal-actions">
+            <button type="button" id="copy-script-btn" class="btn btn-sm">Copy</button>
+            <button type="button" id="dl-script-btn" class="btn btn-sm btn-outline">Download .py</button>
+            <button type="button" id="modal-close" class="btn-close modal-close">✕</button>
+          </div>
+        </div>
+        <div id="changes-modal-summary" class="modal-changes"></div>
+        <textarea id="script-output" class="modal-code mono" readonly></textarea>
+      </div>
+    </div>
+
+    <!-- Loading Overlay -->
+    <div id="loading-overlay" class="loading-overlay hidden">
+      <div class="loading-card">
+        <div class="spinner"></div>
+        <div class="loading-title" id="loading-title">Fetching Job Description…</div>
+        <div class="loading-steps">
+          <div class="step" id="step-1">📡 Fetching job description</div>
+          <div class="step" id="step-2">🤖 Claude analyzing &amp; tailoring</div>
+          <div class="step" id="step-3">📄 Generating PDF (1-page check)</div>
+          <div class="step" id="step-4">✅ Validating &amp; packaging</div>
+        </div>
+      </div>
+    </div>
+
+  </main>
+
+  <footer class="footer">
+    Resume Tailoring System · Claude Opus via Blackbox.ai · ReportLab PDF Engine
+  </footer>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
