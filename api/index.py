@@ -29,12 +29,16 @@ from reportlab.platypus.doctemplate import PageTemplate
 from pypdf import PdfReader
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
-# On Vercel, __file__ = /var/task/api/index.py  → fonts at /var/task/fonts/
-BASE_DIR  = Path(__file__).parent.parent
-FONTS_DIR = BASE_DIR / "fonts"
+# Fonts live in api/fonts/ — co-located with the function so Vercel bundles them
+FONTS_DIR = Path(__file__).parent / "fonts"
 
-# ── Font Registration ──────────────────────────────────────────────────────────
-def _register_fonts():
+# ── Font Registration (lazy — called per request, not at import time) ──────────
+_fonts_registered = False
+
+def _ensure_fonts():
+    global _fonts_registered
+    if _fonts_registered:
+        return
     font_map = {
         "Carlito":            "Carlito-Regular.ttf",
         "Carlito-Bold":       "Carlito-Bold.ttf",
@@ -44,16 +48,11 @@ def _register_fonts():
     for name, fname in font_map.items():
         path = FONTS_DIR / fname
         if not path.exists():
-            raise FileNotFoundError(
-                f"Font missing: {path}  |  "
-                "Run: python setup_fonts.py  |  "
-                "On Vercel: fonts/ must be in the project root."
-            )
+            raise FileNotFoundError(f"Font missing: {path}")
         try:
             pdfmetrics.registerFont(TTFont(name, str(path)))
         except Exception:
-            pass  # Already registered across warm invocations
-
+            pass  # Already registered in a warm Lambda instance
     pdfmetrics.registerFontFamily(
         "Carlito",
         normal="Carlito",
@@ -61,8 +60,7 @@ def _register_fonts():
         italic="Carlito-Italic",
         boldItalic="Carlito-BoldItalic",
     )
-
-_register_fonts()
+    _fonts_registered = True
 
 # ── Claude / Blackbox.ai ───────────────────────────────────────────────────────
 BLACKBOX_API_KEY = os.environ.get("BLACKBOX_API_KEY", "sk-955jZX5iIrvkQxUvuwbubQ")
@@ -270,6 +268,7 @@ CW = PAGE_WIDTH - LM - RM
 
 def build_pdf_to_bytes(tailored: dict, candidate_name: str) -> bytes:
     """Build PDF entirely in memory and return bytes."""
+    _ensure_fonts()  # Register fonts lazily (safe for Vercel cold starts)
     ns  = ParagraphStyle("N",  fontName="Carlito-Bold",    fontSize=13, alignment=TA_CENTER,  spaceAfter=0,   leading=14)
     cs_ = ParagraphStyle("C",  fontName="Carlito",         fontSize=9,  alignment=TA_CENTER,  spaceAfter=0,   leading=11)
     ss  = ParagraphStyle("S",  fontName="Carlito-Bold",    fontSize=10, alignment=TA_LEFT,    spaceBefore=0,  spaceAfter=0, leading=11)
